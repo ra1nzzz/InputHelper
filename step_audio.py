@@ -4,10 +4,13 @@ import queue
 import time
 import tempfile
 import os
+import base64
+import io
+import wave
+import winsound
 
-from config import log
+from config import log, STEP_AUDIO_API_KEY
 
-API_KEY = "64GLA6Ad6JIn8QgL7Qw3UQ9vmSxsFwXkWtt3KgK0VIaCyK903UlAACPkLLAOPJfaw"
 WS_URL = "wss://api.stepfun.com/step_plan/v1/realtime?model=stepaudio-2.5-realtime"
 
 _DEFAULT_VOICE = "qingnianansheng"
@@ -25,13 +28,22 @@ class StepAudioClient:
         self._connected = threading.Event()
         self._pending_text: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
+        self._ws_thread = None
 
     def start(self):
         if self._running:
             return
         self._running = True
-        self._thread = threading.Thread(target=self._run_ws, daemon=True, name="StepAudio")
-        self._thread.start()
+        try:
+            import websocket
+            self._websocket = websocket
+        except ImportError:
+            log.error("StepAudio 需要 websocket-client 库: pip install websocket-client")
+            return
+        self._ws_thread = threading.Thread(target=self._run_ws, daemon=True, name="StepAudio")
+        self._ws_thread.start()
+        player_thread = threading.Thread(target=self._play_audio_loop, daemon=True, name="StepAudioPlayer")
+        player_thread.start()
         log.info("StepAudio WebSocket 连接已启动")
 
     def stop(self):
@@ -41,8 +53,8 @@ class StepAudioClient:
                 self._ws.close()
             except Exception:
                 pass
-        if self._thread is not None:
-            self._thread.join(timeout=3)
+        if self._ws_thread is not None:
+            self._ws_thread.join(timeout=3)
         log.info("StepAudio WebSocket 已关闭")
 
     def speak(self, text: str):
@@ -57,13 +69,7 @@ class StepAudioClient:
         self._instructions = instructions
 
     def _run_ws(self):
-        try:
-            import websocket
-        except ImportError:
-            log.error("StepAudio 需要 websocket-client 库: pip install websocket-client")
-            return
-
-        headers = {"Authorization": f"Bearer {API_KEY}"}
+        headers = {"Authorization": f"Bearer {STEP_AUDIO_API_KEY}"}
 
         def on_open(ws):
             self._ws = ws
@@ -88,12 +94,11 @@ class StepAudioClient:
                 if event_type == "response.audio.delta":
                     audio_b64 = data.get("delta", "")
                     if audio_b64:
-                        import base64
                         self._audio_queue.put(base64.b64decode(audio_b64))
                 elif event_type == "response.done":
                     self._audio_queue.put(None)
-            except Exception as exc:
-                log.debug("StepAudio 消息解析异常: %s", exc)
+            except Exception:
+                pass
 
         def on_error(ws, error):
             log.warning("StepAudio WebSocket 错误: %s", error)
@@ -104,7 +109,7 @@ class StepAudioClient:
 
         while self._running:
             try:
-                ws = websocket.WebSocketApp(
+                ws = self._websocket.WebSocketApp(
                     WS_URL,
                     header=headers,
                     on_open=on_open,
@@ -150,11 +155,6 @@ class StepAudioClient:
                     "type": "response.create",
                     "response": {"modalities": ["audio"]}
                 }))
-
-                import winsound
-                import base64
-                import io
-                import wave
 
                 chunks = []
                 while self._running:
@@ -209,8 +209,6 @@ def init_client(voice: str = _DEFAULT_VOICE, enabled: bool = True):
     if _step_audio_client is None:
         _step_audio_client = StepAudioClient(voice=voice)
         _step_audio_client.start()
-        t = threading.Thread(target=_step_audio_client._play_audio_loop, daemon=True, name="StepAudioPlayer")
-        t.start()
     else:
         _step_audio_client.set_voice(voice)
 

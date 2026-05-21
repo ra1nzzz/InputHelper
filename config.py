@@ -106,7 +106,7 @@ TEXT_REGION_FROM_CONFIRM_H = 60
 def apply_settings():
     global CHECK_INTERVAL_MS, VOICE_DONE_STABLE_FRAMES, ACTIVATE_HOTKEY, TRIGGER_HOTKEY
     global INPUT_METHOD, WAKE_WORD_ENABLED, WAKE_WORD, WAKE_IDLE_TIMEOUT_MIN
-    global STEP_AUDIO_ENABLED, STEP_AUDIO_VOICE
+    global STEP_AUDIO_ENABLED, STEP_AUDIO_VOICE, STEP_AUDIO_API_KEY
     from settings import get
     INPUT_METHOD = InputMethod(get("input_method", "zhipu"))
     hotkey = get("activate_hotkey", ["alt", "space"])
@@ -120,6 +120,7 @@ def apply_settings():
     WAKE_IDLE_TIMEOUT_MIN = get("wake_idle_timeout_min", 5)
     STEP_AUDIO_ENABLED = get("step_audio_enabled", False)
     STEP_AUDIO_VOICE = get("step_audio_voice", "qingnianansheng")
+    STEP_AUDIO_API_KEY = get("step_audio_api_key", "64GLA6Ad6JIn8QgL7Qw3UQ9vmSxsFwXkWtt3KgK0VIaCyK903UlAACPkLLAOPJfaw")
     log.info("配置已应用: input_method=%s, 快捷键=%s/%s, 静音帧数=%d, 检测间隔=%dms, 唤醒词=%s/%s, StepAudio=%s/%s",
              INPUT_METHOD.value, "+".join(ACTIVATE_HOTKEY), "+".join(TRIGGER_HOTKEY),
              VOICE_DONE_STABLE_FRAMES, CHECK_INTERVAL_MS,
@@ -144,9 +145,19 @@ REQUIRED_TEMPLATES = [
     (TEMPLATE_CLOSE_BTN, "识别结果弹窗中的「关闭」按钮"),
 ]
 
+# === 闭环反馈控制参数 ===
+CONFIDENCE_ADAPTATION_ENABLED = True
+CONFIDENCE_BASE = 0.82
+CONFIDENCE_MIN = 0.65
+CONFIDENCE_MAX = 0.90
+CONFIDENCE_STEP = 0.02
+CONFIDENCE_SUCCESS_THRESHOLD = 0.90
+CONFIDENCE_FAIL_THRESHOLD = 0.30
+
 # === 前馈控制参数 (Feedforward Control) ===
 FEEDFORWARD_ENABLED = True
 
 # === StepAudio 实时播报参数 ===
 STEP_AUDIO_ENABLED = False
 STEP_AUDIO_VOICE = "qingnianansheng"
+STEP_AUDIO_API_KEY = "64GLA6Ad6JIn8QgL7Qw3UQ9vmSxsFwXkWtt3KgK0VIaCyK903UlAACPkLLAOPJfaw"

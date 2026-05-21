@@ -2,21 +2,32 @@ import pyautogui
 import cv2
 import numpy as np
 import time
-import threading
 
 from config import TEMPLATES_DIR, SCREENSHOT_DIR, log, MULTI_SCALE_MATCH, MULTI_SCALE_RANGES
 from region_learner import region_learner
 
 _template_cache: dict[str, np.ndarray | None] = {}
-_screen_cache_local = threading.local()
+_scaled_template_cache: dict[tuple, np.ndarray] = {}
+_screen_cache_data: np.ndarray | None = None
+_screen_cache_time: float = 0.0
+_screen_cache_region: tuple | None = None
+_SCREEN_CACHE_TTL: float = 0.15
 
 
 def _get_screen_cache():
-    if not hasattr(_screen_cache_local, "data"):
-        _screen_cache_local.data = None
-        _screen_cache_local.time = 0.0
-        _screen_cache_local.region = None
-    return _screen_cache_local
+    global _screen_cache_data, _screen_cache_time, _screen_cache_region
+    return type("Cache", (), {
+        "data": _screen_cache_data,
+        "time": _screen_cache_time,
+        "region": _screen_cache_region,
+    })()
+
+
+def _update_screen_cache(data, t, region):
+    global _screen_cache_data, _screen_cache_time, _screen_cache_region
+    _screen_cache_data = data
+    _screen_cache_time = t
+    _screen_cache_region = region
 
 
 def _load_template(name: str) -> np.ndarray | None:
@@ -36,18 +47,27 @@ def _load_template(name: str) -> np.ndarray | None:
     return img
 
 
+def _get_scaled_template(template: np.ndarray, scale: float) -> np.ndarray:
+    cache_key = (id(template), scale)
+    if cache_key in _scaled_template_cache:
+        return _scaled_template_cache[cache_key]
+    h, w = template.shape[:2]
+    new_w, new_h = int(w * scale), int(h * scale)
+    resized = cv2.resize(template, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    _scaled_template_cache[cache_key] = resized
+    return resized
+
+
 def clear_template_cache():
     _template_cache.clear()
-
-
-_SCREEN_CACHE_TTL: float = 0.15
+    _scaled_template_cache.clear()
 
 
 def _screenshot(region: tuple = None) -> np.ndarray:
-    cache = _get_screen_cache()
+    global _screen_cache_data, _screen_cache_time, _screen_cache_region
     now = time.time()
-    if cache.data is not None and (now - cache.time) < _SCREEN_CACHE_TTL and cache.region == region:
-        return cache.data
+    if _screen_cache_data is not None and (now - _screen_cache_time) < _SCREEN_CACHE_TTL and _screen_cache_region == region:
+        return _screen_cache_data
     if region is not None:
         left, top, w, h = region
         if w <= 0 or h <= 0:
@@ -57,16 +77,16 @@ def _screenshot(region: tuple = None) -> np.ndarray:
         img = pyautogui.screenshot(region=region)
     else:
         img = pyautogui.screenshot()
-    cache.data = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-    cache.time = now
-    cache.region = region
-    return cache.data
+    _screen_cache_data = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    _screen_cache_time = now
+    _screen_cache_region = region
+    return _screen_cache_data
 
 
 def invalidate_screen_cache():
-    cache = _get_screen_cache()
-    cache.data = None
-    cache.region = None
+    global _screen_cache_data, _screen_cache_region
+    _screen_cache_data = None
+    _screen_cache_region = None
 
 
 def save_debug_screenshot(tag: str, img_bgr=None):
@@ -87,7 +107,7 @@ def _multi_scale_match(haystack: np.ndarray, template: np.ndarray, base_confiden
             new_w, new_h = int(w * s), int(h * s)
             if new_h > haystack.shape[0] or new_w > haystack.shape[1]:
                 continue
-            resized = cv2.resize(template, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            resized = _get_scaled_template(template, s)
             r = _match_one(haystack, resized, base_confidence - 0.05)
         if r and (best is None or r["confidence"] > best["confidence"]):
             best = r

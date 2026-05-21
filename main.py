@@ -3,6 +3,7 @@ import time
 import threading
 import queue
 import pyperclip
+import numpy as np
 
 import pyautogui
 import win32gui
@@ -155,7 +156,6 @@ class SystemIdentifier:
             log.info("  辨识[%d/%d]: 语音条出现延迟=%.2fs", i + 1, iterations, t1 - t0)
 
         if latencies:
-            import numpy as np
             self._metrics["bar_latency_p50"] = float(np.median(latencies))
             self._metrics["bar_latency_p95"] = float(np.percentile(latencies, 95))
             log.info("系统辨识完成: 语音条延迟 p50=%.2fs p95=%.2fs",
@@ -376,8 +376,7 @@ class InputHelper:
     # ========== 通用状态 ==========
 
     def _do_idle(self):
-        if not self._stop_event.is_set():
-            time.sleep(1.0)
+        pass
 
     def _do_wake_monitor(self):
         if self._check_idle_timeout():
