@@ -259,9 +259,16 @@ class _SettingsDialog(tk.Toplevel):
             ("cixingnansheng", "磁性男声"),
             ("wenrounvsheng", "温柔女声"),
         ]
-        for voice_val, voice_label in voices:
-            ttk.Radiobutton(voice_frame, text=voice_label, variable=self._step_audio_voice_var,
-                            value=voice_val).pack(side=tk.LEFT, padx=(0, 12))
+        self._voice_preview_btns = []
+        for idx, (voice_val, voice_label) in enumerate(voices):
+            inner = ttk.Frame(voice_frame)
+            inner.pack(side=tk.LEFT, padx=(0, 4))
+            ttk.Radiobutton(inner, text=voice_label, variable=self._step_audio_voice_var,
+                            value=voice_val).pack(side=tk.LEFT)
+            btn = ttk.Button(inner, text="试听", width=3,
+                             command=lambda v=voice_val: self._preview_voice(v))
+            btn.pack(side=tk.LEFT, padx=(0, 2))
+            self._voice_preview_btns.append(btn)
 
         ttk.Separator(tab3, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
 
@@ -454,3 +461,19 @@ class _SettingsDialog(tk.Toplevel):
             self._activate_btn.config(state="normal")
             self._trigger_btn.config(state="normal")
         _do_close_settings()
+
+    def _preview_voice(self, voice: str):
+        api_key = self._step_audio_api_key_var.get().strip()
+        if not api_key:
+            messagebox.showwarning("提示", "请先填写 API Key 再进行预览", parent=self)
+            return
+        import threading as _th
+        from step_audio import preview_voice as _pv
+        for btn in self._voice_preview_btns:
+            btn.config(state="disabled")
+        def _run():
+            try:
+                _pv(voice, api_key)
+            finally:
+                self.after(0, lambda: [btn.config(state="normal") for btn in self._voice_preview_btns])
+        _th.Thread(target=_run, daemon=True).start()

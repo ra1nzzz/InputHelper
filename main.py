@@ -26,6 +26,9 @@ from config import (
     STEP_AUDIO_ENABLED, STEP_AUDIO_VOICE,
     FOREGROUND_DELAY_S, ACTIVATION_POST_DELAY_S, QW_RELEASE_DELAY_S,
     COPY_CLIPBOARD_DELAY_S,
+    OUTPUT_MONITOR_CHECK_INTERVAL_S, OUTPUT_MONITOR_CAPTURE_GAP_S,
+    OUTPUT_MONITOR_CONSECUTIVE_STOPS, OUTPUT_MONITOR_PIXEL_DIFF_THRESHOLD,
+    OUTPUT_MONITOR_MAX_DURATION_S,
 )
 from detector import (
     find_template, find_on_screen, check_on_screen,
@@ -68,6 +71,7 @@ class State(enum.Enum):
     QW_WAITING_INPUT = "等待千问输入"
     QW_ENTER_SEND = "回车发送(千问)"
 
+    WAIT_OUTPUT = "等待AI输出"
     ERROR = "错误"
 
 
@@ -196,6 +200,91 @@ class SystemIdentifier:
 
 
 _system_identifier = SystemIdentifier()
+
+
+def _compare_screenshots(img1, img2) -> bool:
+    try:
+        import cv2 as _cv
+        import numpy as _np
+        a1 = _cv.cvtColor(_np.array(img1), _cv.COLOR_RGB2GRAY)
+        a2 = _cv.cvtColor(_np.array(img2), _cv.COLOR_RGB2GRAY)
+        h = min(a1.shape[0], a2.shape[0])
+        a1 = a1[:int(h * 0.7), :]
+        a2 = a2[:int(h * 0.7), :]
+        if a1.shape != a2.shape:
+            a2 = _cv.resize(a2, (a1.shape[1], a1.shape[0]))
+        diff = _np.mean(_np.abs(a1.astype(float) - a2.astype(float)))
+        return diff < OUTPUT_MONITOR_PIXEL_DIFF_THRESHOLD
+    except Exception:
+        return False
+
+
+class _OutputMonitor:
+    def __init__(self):
+        self._thread = None
+        self._running = False
+        self._on_stop = None
+
+    def start(self, on_stop_callback):
+        self._on_stop = on_stop_callback
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True, name="OutputMonitor")
+        self._thread.start()
+        log.info("AI输出监控已启动 (每%ds检查, 连续%d次无变化触发)",
+                 OUTPUT_MONITOR_CHECK_INTERVAL_S, OUTPUT_MONITOR_CONSECUTIVE_STOPS)
+
+    def stop(self):
+        self._running = False
+
+    def _run(self):
+        consecutive = 0
+        deadline = time.time() + OUTPUT_MONITOR_MAX_DURATION_S
+        while self._running and time.time() < deadline:
+            for _ in range(OUTPUT_MONITOR_CHECK_INTERVAL_S * 10):
+                if not self._running:
+                    return
+                time.sleep(0.1)
+            if not self._running:
+                return
+            screen1 = self._capture_active()
+            for _ in range(OUTPUT_MONITOR_CAPTURE_GAP_S * 10):
+                if not self._running:
+                    return
+                time.sleep(0.1)
+            if not self._running:
+                return
+            screen2 = self._capture_active()
+            if screen1 is None or screen2 is None:
+                continue
+            if _compare_screenshots(screen1, screen2):
+                consecutive += 1
+                log.info("输出停止检测[%d/%d]: 屏幕无变化", consecutive, OUTPUT_MONITOR_CONSECUTIVE_STOPS)
+                if consecutive >= OUTPUT_MONITOR_CONSECUTIVE_STOPS:
+                    log.info("输出已停止 (连续%d次无变化)", OUTPUT_MONITOR_CONSECUTIVE_STOPS)
+                    if self._on_stop:
+                        self._on_stop(screen2)
+                    return
+            else:
+                if consecutive > 0:
+                    log.info("输出停止检测: 屏幕有变化, 重置计数器")
+                consecutive = 0
+
+    @staticmethod
+    def _capture_active():
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            if not hwnd:
+                return None
+            rect = win32gui.GetWindowRect(hwnd)
+            w, h = rect[2] - rect[0], rect[3] - rect[1]
+            if w < 200 or h < 100:
+                return None
+            import pyautogui as _pg
+            return _pg.screenshot(region=rect)
+        except Exception:
+            return None
 
 
 class _ZhipuWorkflow:
@@ -432,6 +521,7 @@ class InputHelper(_ZhipuWorkflow, _QianwenWorkflow):
         self._in_cycle = False
         self._region_learner = region_learner
         self._step_audio_client = step_audio_client
+        self._output_monitor = _OutputMonitor()
 
     def _cancel_feedforward(self):
         if self._feedforward_timer is not None:
@@ -486,6 +576,7 @@ class InputHelper(_ZhipuWorkflow, _QianwenWorkflow):
         if STEP_AUDIO_ENABLED:
             log.info("StepAudio 实时语音播报已启用")
 
+        self._output_monitor.start()
         play_start()
 
         while not self._stop_event.is_set():
@@ -505,6 +596,7 @@ class InputHelper(_ZhipuWorkflow, _QianwenWorkflow):
     def stop(self):
         self._stop_event.set()
         self._cancel_feedforward()
+        self._output_monitor.stop()
         region_learner.save()
         step_cleanup()
         log.info("助手停止请求")
@@ -569,6 +661,7 @@ class InputHelper(_ZhipuWorkflow, _QianwenWorkflow):
             State.QW_SPEAKING: CHECK_INTERVAL_MS,
             State.QW_WAITING_INPUT: ADAPTIVE_MAX_INTERVAL_MS,
             State.QW_ENTER_SEND: ADAPTIVE_MAX_INTERVAL_MS,
+            State.WAIT_OUTPUT: ADAPTIVE_MAX_INTERVAL_MS,
             State.ERROR: ADAPTIVE_MAX_INTERVAL_MS,
         }
         return state_intervals.get(self.state, CHECK_INTERVAL_MS)
@@ -599,6 +692,7 @@ class InputHelper(_ZhipuWorkflow, _QianwenWorkflow):
             State.QW_SPEAKING: self._do_qw_speaking,
             State.QW_WAITING_INPUT: self._do_qw_waiting_input,
             State.QW_ENTER_SEND: self._do_qw_enter_send,
+            State.WAIT_OUTPUT: self._do_wait_output,
             State.ERROR: self._do_error,
         }
         handler = handler_map.get(self.state)
@@ -640,12 +734,33 @@ class InputHelper(_ZhipuWorkflow, _QianwenWorkflow):
         if clip_text and len(clip_text) > 0:
             step_speak(clip_text[:500])
 
+        log.info("开始监控AI输出...")
+        self._output_monitor.start(on_stop_callback=self._on_output_stop)
+        self._transition(State.WAIT_OUTPUT)
+
+    def _do_wait_output(self):
+        pass
+
+    def _on_output_stop(self, latest_screenshot):
+        log.info("AI输出已停止，开始OCR识别...")
+        try:
+            from ocr import extract_text
+            text = extract_text(latest_screenshot)
+            if text:
+                log.info("OCR识别内容(%d字): %s...", len(text), text[:100])
+                step_speak(text[:500])
+            else:
+                log.warning("OCR未识别到内容")
+        except Exception as exc:
+            log.warning("OCR播报失败: %s", exc)
+
         if self._wake_enabled:
             self._schedule_idle_timeout()
-            self._transition(State.WAKE_MONITOR)
+            self._pending_transition.put(State.WAKE_MONITOR)
         else:
-            time.sleep(1.0)
-            self._transition(State.ACTIVATING)
+            self._pending_transition.put(State.ACTIVATING if self._input_method == InputMethod.ZHIPU
+                                          else State.QW_MONITORING_KEY)
+        log.info("AI输出监控结束")
 
     # ========== 错误处理 ==========
 
