@@ -1,0 +1,10 @@
+pyautogui
+Pillow
+opencv-python
+numpy
+pywin32
+keyboard
+pystray
+pyaudio
+webrtcvad
+vosk

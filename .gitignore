@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+build/
+dist/
+*.spec
+logs/
+_debug_screenshots/
+user_screenshots/
+*.egg-info/
+.eggs/
+.pytest_cache/
+vosk_model/
+settings.json
+learned_regions.json
+.env
