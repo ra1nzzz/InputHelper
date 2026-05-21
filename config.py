@@ -106,6 +106,7 @@ TEXT_REGION_FROM_CONFIRM_H = 60
 def apply_settings():
     global CHECK_INTERVAL_MS, VOICE_DONE_STABLE_FRAMES, ACTIVATE_HOTKEY, TRIGGER_HOTKEY
     global INPUT_METHOD, WAKE_WORD_ENABLED, WAKE_WORD, WAKE_IDLE_TIMEOUT_MIN
+    global STEP_AUDIO_ENABLED, STEP_AUDIO_VOICE
     from settings import get
     INPUT_METHOD = InputMethod(get("input_method", "zhipu"))
     hotkey = get("activate_hotkey", ["alt", "space"])
@@ -117,11 +118,14 @@ def apply_settings():
     WAKE_WORD_ENABLED = get("wake_word_enabled", False)
     WAKE_WORD = get("wake_word", "开始输入")
     WAKE_IDLE_TIMEOUT_MIN = get("wake_idle_timeout_min", 5)
-    log.info("配置已应用: input_method=%s, 快捷键=%s/%s, 静音帧数=%d, 检测间隔=%dms, 唤醒词=%s/%s",
+    STEP_AUDIO_ENABLED = get("step_audio_enabled", False)
+    STEP_AUDIO_VOICE = get("step_audio_voice", "qingnianansheng")
+    log.info("配置已应用: input_method=%s, 快捷键=%s/%s, 静音帧数=%d, 检测间隔=%dms, 唤醒词=%s/%s, StepAudio=%s/%s",
              INPUT_METHOD.value, "+".join(ACTIVATE_HOTKEY), "+".join(TRIGGER_HOTKEY),
              VOICE_DONE_STABLE_FRAMES, CHECK_INTERVAL_MS,
              WAKE_WORD if WAKE_WORD_ENABLED else "关闭",
-             f"{WAKE_IDLE_TIMEOUT_MIN}min" if WAKE_WORD_ENABLED else "")
+             f"{WAKE_IDLE_TIMEOUT_MIN}min" if WAKE_WORD_ENABLED else "",
+             "开" if STEP_AUDIO_ENABLED else "关", STEP_AUDIO_VOICE)
 
 # === 模板文件名 ===
 TEMPLATE_READY_TO_SPEAKING = "ready_to_speaking.png"
@@ -142,3 +146,7 @@ REQUIRED_TEMPLATES = [
 
 # === 前馈控制参数 (Feedforward Control) ===
 FEEDFORWARD_ENABLED = True
+
+# === StepAudio 实时播报参数 ===
+STEP_AUDIO_ENABLED = False
+STEP_AUDIO_VOICE = "qingnianansheng"

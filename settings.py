@@ -17,6 +17,8 @@ DEFAULTS = {
     "wake_word_enabled": False,
     "wake_word": "开始输入",
     "wake_idle_timeout_min": 5,
+    "step_audio_enabled": False,
+    "step_audio_voice": "qingnianansheng",
 }
 
 _settings: dict = {}

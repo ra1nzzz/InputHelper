@@ -22,6 +22,7 @@ from config import (
     WAKE_WORD_ENABLED, WAKE_WORD, WAKE_IDLE_TIMEOUT_MIN,
     FEEDFORWARD_ENABLED,
     ADAPTIVE_MIN_INTERVAL_MS, ADAPTIVE_MAX_INTERVAL_MS,
+    STEP_AUDIO_ENABLED, STEP_AUDIO_VOICE,
 )
 from detector import (
     find_template, find_on_screen, check_on_screen,
@@ -35,6 +36,7 @@ from controller import (
 from sound import play_start, play_success, play_error
 from region_learner import region_learner
 from wake_word import create_detector
+from step_audio import init_client, speak as step_speak, cleanup as step_cleanup
 
 set_dpi_aware()
 setup_logging()
@@ -250,6 +252,10 @@ class InputHelper:
                 log.info("使用系统辨识参数")
             self._transition(State.ACTIVATING if input_method == InputMethod.ZHIPU else State.QW_MONITORING_KEY)
 
+        init_client(STEP_AUDIO_VOICE, STEP_AUDIO_ENABLED)
+        if STEP_AUDIO_ENABLED:
+            log.info("StepAudio 实时语音播报已启用")
+
         play_start()
 
         while not self._stop_event.is_set():
@@ -270,6 +276,7 @@ class InputHelper:
         self._stop_event.set()
         self._cancel_feedforward()
         region_learner.save()
+        step_cleanup()
         log.info("助手停止请求")
 
     def _setup_wake_detector(self):
@@ -548,6 +555,9 @@ class InputHelper:
         type_enter()
         log.info("已执行粘贴+回车")
         play_success()
+
+        if clip_text and len(clip_text) > 0:
+            step_speak(clip_text[:500])
 
         if self._wake_enabled:
             self._schedule_idle_timeout()

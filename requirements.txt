@@ -8,3 +8,4 @@ pystray
 pyaudio
 webrtcvad
 vosk
+websocket-client

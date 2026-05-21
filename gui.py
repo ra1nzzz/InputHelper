@@ -110,6 +110,8 @@ class _SettingsDialog(tk.Toplevel):
         self._wake_enabled_var = tk.BooleanVar(value=False)
         self._wake_word_var = tk.StringVar(value="开始输入")
         self._wake_timeout_var = tk.IntVar(value=5)
+        self._step_audio_enabled_var = tk.BooleanVar(value=False)
+        self._step_audio_voice_var = tk.StringVar(value="qingnianansheng")
         self._capturing = False
         self._captured_keys = []
         self._capture_target = None
@@ -132,6 +134,9 @@ class _SettingsDialog(tk.Toplevel):
 
         tab2 = ttk.Frame(notebook, padding=8)
         notebook.add(tab2, text="唤醒词")
+
+        tab3 = ttk.Frame(notebook, padding=8)
+        notebook.add(tab3, text="语音播报")
 
         # ====== Tab 1: 基本设置 ======
         ttk.Label(tab1, text="输入法选择:", font=("Microsoft YaHei", 10)).pack(anchor=tk.W, **pad)
@@ -233,6 +238,43 @@ class _SettingsDialog(tk.Toplevel):
                                foreground="gray", justify=tk.LEFT)
         info_label.pack(anchor=tk.W, padx=16, pady=8)
 
+        # ====== Tab 3: 语音播报 (StepAudio) ======
+        self._step_audio_check = ttk.Checkbutton(
+            tab3, text="启用 StepAudio 实时语音播报",
+            variable=self._step_audio_enabled_var,
+        )
+        self._step_audio_check.pack(anchor=tk.W, **pad)
+        ttk.Label(tab3, text="使用 stepaudio-2.5-realtime 模型低延迟播报识别结果，\n适用于 VibeCoding 决策播报和好友聊天语音回复",
+                  font=("Microsoft YaHei", 8), foreground="gray").pack(anchor=tk.W, padx=16)
+
+        row_voice = ttk.Frame(tab3)
+        row_voice.pack(fill=tk.X, **pad)
+        ttk.Label(row_voice, text="播报音色:", font=("Microsoft YaHei", 10)).pack(side=tk.LEFT)
+        voice_frame = ttk.Frame(row_voice)
+        voice_frame.pack(side=tk.LEFT, padx=(6, 0))
+        voices = [
+            ("qingnianansheng", "青年男声"),
+            ("qingniannvsheng", "青年女声"),
+            ("cixingnansheng", "磁性男声"),
+            ("wenrounvsheng", "温柔女声"),
+        ]
+        for voice_val, voice_label in voices:
+            ttk.Radiobutton(voice_frame, text=voice_label, variable=self._step_audio_voice_var,
+                            value=voice_val).pack(side=tk.LEFT, padx=(0, 12))
+
+        ttk.Separator(tab3, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
+
+        info_text_step = (
+            "技术说明:\n"
+            "• 使用 stepaudio-2.5-realtime 模型，非传统 TTS\n"
+            "• 优势：响应延迟更低，语音更自然有表现力\n"
+            "• 适用场景：VibeCoding 结果播报、聊天语音回复\n"
+            "• 需要网络连接，API Key 已内置"
+        )
+        info_label_step = ttk.Label(tab3, text=info_text_step, font=("Microsoft YaHei", 8),
+                                    foreground="gray", justify=tk.LEFT)
+        info_label_step.pack(anchor=tk.W, padx=16, pady=8)
+
         # ====== 底部按钮 ======
         ttk.Separator(main, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
 
@@ -261,6 +303,8 @@ class _SettingsDialog(tk.Toplevel):
         self._wake_enabled_var.set(s.get("wake_word_enabled", False))
         self._wake_word_var.set(s.get("wake_word", "开始输入"))
         self._wake_timeout_var.set(s.get("wake_idle_timeout_min", 5))
+        self._step_audio_enabled_var.set(s.get("step_audio_enabled", False))
+        self._step_audio_voice_var.set(s.get("step_audio_voice", "qingnianansheng"))
         self._on_wake_toggle()
         self._on_input_method_change()
 
@@ -348,6 +392,8 @@ class _SettingsDialog(tk.Toplevel):
         wake_enabled = self._wake_enabled_var.get() and input_method == "zhipu"
         wake_word = self._wake_word_var.get().strip()
         wake_timeout = self._wake_timeout_var.get()
+        step_audio_enabled = self._step_audio_enabled_var.get()
+        step_audio_voice = self._step_audio_voice_var.get()
 
         if wake_enabled and not wake_word:
             messagebox.showwarning("提示", "启用唤醒词功能时，唤醒词不能为空", parent=self)
@@ -365,6 +411,8 @@ class _SettingsDialog(tk.Toplevel):
             "wake_word_enabled": wake_enabled,
             "wake_word": wake_word,
             "wake_idle_timeout_min": wake_timeout,
+            "step_audio_enabled": step_audio_enabled,
+            "step_audio_voice": step_audio_voice,
         })
 
         try:
