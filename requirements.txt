@@ -9,3 +9,4 @@ pyaudio
 webrtcvad
 vosk
 websocket-client
+pytesseract

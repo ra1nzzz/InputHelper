@@ -9,6 +9,7 @@ import winsound
 import websocket
 
 from config import log, STEP_AUDIO_API_KEY
+from protocol import ISpeechClient
 
 WS_URL = "wss://api.stepfun.com/step_plan/v1/realtime?model=stepaudio-2.5-realtime"
 
@@ -16,7 +17,7 @@ _DEFAULT_VOICE = "qingnianansheng"
 _DEFAULT_INSTRUCTIONS = "你是一个语音播报助手，用自然、清晰的语气朗读用户提供的文本。不要添加额外的问候语或解释，直接朗读文本内容。"
 
 
-class StepAudioClient:
+class StepAudioClient(ISpeechClient):
     def __init__(self, voice: str = _DEFAULT_VOICE, instructions: str = _DEFAULT_INSTRUCTIONS, api_key: str = ""):
         self._voice = voice
         self._instructions = instructions

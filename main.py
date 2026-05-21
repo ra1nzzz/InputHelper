@@ -4,6 +4,7 @@ import threading
 import queue
 import pyperclip
 import numpy as np
+import cv2
 
 import pyautogui
 import win32gui
@@ -204,16 +205,14 @@ _system_identifier = SystemIdentifier()
 
 def _compare_screenshots(img1, img2) -> bool:
     try:
-        import cv2 as _cv
-        import numpy as _np
-        a1 = _cv.cvtColor(_np.array(img1), _cv.COLOR_RGB2GRAY)
-        a2 = _cv.cvtColor(_np.array(img2), _cv.COLOR_RGB2GRAY)
+        a1 = cv2.cvtColor(np.array(img1), cv2.COLOR_RGB2GRAY)
+        a2 = cv2.cvtColor(np.array(img2), cv2.COLOR_RGB2GRAY)
         h = min(a1.shape[0], a2.shape[0])
         a1 = a1[:int(h * 0.7), :]
         a2 = a2[:int(h * 0.7), :]
         if a1.shape != a2.shape:
-            a2 = _cv.resize(a2, (a1.shape[1], a1.shape[0]))
-        diff = _np.mean(_np.abs(a1.astype(float) - a2.astype(float)))
+            a2 = cv2.resize(a2, (a1.shape[1], a1.shape[0]))
+        diff = np.mean(np.abs(a1.astype(float) - a2.astype(float)))
         return diff < OUTPUT_MONITOR_PIXEL_DIFF_THRESHOLD
     except Exception:
         return False
@@ -224,11 +223,13 @@ class _OutputMonitor:
         self._thread = None
         self._running = False
         self._on_stop = None
+        self._stop_event = threading.Event()
 
     def start(self, on_stop_callback):
         self._on_stop = on_stop_callback
         if self._running:
-            return
+            self._stop_event.set()
+            self._stop_event = threading.Event()
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True, name="OutputMonitor")
         self._thread.start()
@@ -237,22 +238,19 @@ class _OutputMonitor:
 
     def stop(self):
         self._running = False
+        self._stop_event.set()
 
     def _run(self):
         consecutive = 0
         deadline = time.time() + OUTPUT_MONITOR_MAX_DURATION_S
         while self._running and time.time() < deadline:
-            for _ in range(OUTPUT_MONITOR_CHECK_INTERVAL_S * 10):
-                if not self._running:
-                    return
-                time.sleep(0.1)
+            if not self._stop_event.wait(timeout=OUTPUT_MONITOR_CHECK_INTERVAL_S):
+                return
             if not self._running:
                 return
             screen1 = self._capture_active()
-            for _ in range(OUTPUT_MONITOR_CAPTURE_GAP_S * 10):
-                if not self._running:
-                    return
-                time.sleep(0.1)
+            if not self._stop_event.wait(timeout=OUTPUT_MONITOR_CAPTURE_GAP_S):
+                return
             if not self._running:
                 return
             screen2 = self._capture_active()
@@ -281,8 +279,7 @@ class _OutputMonitor:
             w, h = rect[2] - rect[0], rect[3] - rect[1]
             if w < 200 or h < 100:
                 return None
-            import pyautogui as _pg
-            return _pg.screenshot(region=rect)
+            return pyautogui.screenshot(region=rect)
         except Exception:
             return None
 
@@ -576,7 +573,6 @@ class InputHelper(_ZhipuWorkflow, _QianwenWorkflow):
         if STEP_AUDIO_ENABLED:
             log.info("StepAudio 实时语音播报已启用")
 
-        self._output_monitor.start()
         play_start()
 
         while not self._stop_event.is_set():
@@ -645,6 +641,10 @@ class InputHelper(_ZhipuWorkflow, _QianwenWorkflow):
                 self._transition(item)
 
     def _get_adaptive_interval(self) -> int:
+        base = self._get_base_interval()
+        return self._adjust_interval(base)
+
+    def _get_base_interval(self) -> int:
         state_intervals = {
             State.IDLE: ADAPTIVE_MAX_INTERVAL_MS,
             State.WAKE_MONITOR: ADAPTIVE_MAX_INTERVAL_MS,
@@ -665,6 +665,19 @@ class InputHelper(_ZhipuWorkflow, _QianwenWorkflow):
             State.ERROR: ADAPTIVE_MAX_INTERVAL_MS,
         }
         return state_intervals.get(self.state, CHECK_INTERVAL_MS)
+
+    def _adjust_interval(self, base: int) -> int:
+        if self.state in (State.SPEAKING, State.CONFIRMING, State.RESULT_COPY):
+            proc_lats = self._metrics_runtime.get("processing_latencies", [])
+            if len(proc_lats) >= 3:
+                recent_avg = sum(proc_lats[-3:]) / len(proc_lats[-3:])
+                if recent_avg < 1.0:
+                    return max(ADAPTIVE_MIN_INTERVAL_MS, int(base * 0.8))
+                elif recent_avg > 3.0:
+                    return min(ADAPTIVE_MAX_INTERVAL_MS, int(base * 1.2))
+        if self.state == State.ERROR:
+            return min(ADAPTIVE_MAX_INTERVAL_MS, base + self._error_count * 100)
+        return base
 
     def _transition(self, new_state: State):
         if self.state != new_state:

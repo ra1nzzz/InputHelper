@@ -6,6 +6,7 @@ import time
 from config import TEMPLATES_DIR, SCREENSHOT_DIR, log, MULTI_SCALE_MATCH, MULTI_SCALE_RANGES
 from config import CONFIDENCE_ADAPTATION_ENABLED, CONFIDENCE_BASE, CONFIDENCE_MIN, CONFIDENCE_MAX, CONFIDENCE_STEP, CONFIDENCE_SUCCESS_THRESHOLD, CONFIDENCE_FAIL_THRESHOLD
 from region_learner import region_learner
+from protocol import IDetector
 
 _template_cache: dict[str, np.ndarray | None] = {}
 _scaled_template_cache: dict[tuple, np.ndarray] = {}
@@ -16,6 +17,7 @@ _SCREEN_CACHE_TTL: float = 0.15
 
 _conf_adapt: dict[str, float] = {}
 _conf_history: dict[str, list[bool]] = {}
+_conf_difficulty: dict[str, float] = {}
 
 
 def _get_adapted_confidence(template_name: str, base_confidence: float) -> float:
@@ -24,7 +26,9 @@ def _get_adapted_confidence(template_name: str, base_confidence: float) -> float
     adapted = _conf_adapt.get(template_name)
     if adapted is None:
         return base_confidence
-    return max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, adapted))
+    difficulty = _conf_difficulty.get(template_name, 1.0)
+    adjusted = adapted * difficulty
+    return max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, adjusted))
 
 
 def _record_match(template_name: str, success: bool):
@@ -37,17 +41,20 @@ def _record_match(template_name: str, success: bool):
     if len(history) > 20:
         history.pop(0)
     recent_success = sum(history[-10:])
+    total = len(history[-10:])
     current = _conf_adapt.get(template_name, CONFIDENCE_BASE)
-    if recent_success >= int(10 * CONFIDENCE_SUCCESS_THRESHOLD):
+    if recent_success >= int(total * CONFIDENCE_SUCCESS_THRESHOLD):
         new_conf = min(CONFIDENCE_MAX, current + CONFIDENCE_STEP)
+        _conf_difficulty[template_name] = max(0.8, _conf_difficulty.get(template_name, 1.0) - 0.05)
         if new_conf != current:
             _conf_adapt[template_name] = new_conf
-            log.debug("置信度上调 %s: %.2f -> %.2f", template_name, current, new_conf)
-    elif recent_success <= int(10 * CONFIDENCE_FAIL_THRESHOLD):
+            log.debug("置信度上调 %s: %.2f -> %.2f (难度=%.1f)", template_name, current, new_conf, _conf_difficulty[template_name])
+    elif recent_success <= int(total * CONFIDENCE_FAIL_THRESHOLD):
         new_conf = max(CONFIDENCE_MIN, current - CONFIDENCE_STEP)
+        _conf_difficulty[template_name] = min(1.3, _conf_difficulty.get(template_name, 1.0) + 0.05)
         if new_conf != current:
             _conf_adapt[template_name] = new_conf
-            log.debug("置信度下调 %s: %.2f -> %.2f", template_name, current, new_conf)
+            log.debug("置信度下调 %s: %.2f -> %.2f (难度=%.1f)", template_name, current, new_conf, _conf_difficulty[template_name])
     else:
         _conf_adapt[template_name] = current
 
@@ -331,3 +338,17 @@ def get_voice_bar_region() -> tuple | None:
                 left, top, w, h = region
                 return (left, top, w, h + 80)
     return None
+
+
+class DetectorAdapter(IDetector):
+    def find(self, template_name: str, confidence: float = 0.82) -> dict | None:
+        return find_template(template_name, confidence)
+
+    def find_on_screen(self, screen, template_name: str, confidence: float = 0.7) -> dict | None:
+        return find_on_screen(screen, template_name, confidence)
+
+    def check_on_screen(self, screen, template_name: str, confidence: float = 0.82) -> bool:
+        return check_on_screen(screen, template_name, confidence)
+
+    def batch_check(self, screen, checks: list[tuple]) -> dict[str, bool]:
+        return batch_check(screen, checks)
