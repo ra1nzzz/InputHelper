@@ -4,6 +4,7 @@ import numpy as np
 import time
 
 from config import TEMPLATES_DIR, SCREENSHOT_DIR, log, MULTI_SCALE_MATCH, MULTI_SCALE_RANGES
+from config import CONFIDENCE_ADAPTATION_ENABLED, CONFIDENCE_BASE, CONFIDENCE_MIN, CONFIDENCE_MAX, CONFIDENCE_STEP, CONFIDENCE_SUCCESS_THRESHOLD, CONFIDENCE_FAIL_THRESHOLD
 from region_learner import region_learner
 
 _template_cache: dict[str, np.ndarray | None] = {}
@@ -12,6 +13,43 @@ _screen_cache_data: np.ndarray | None = None
 _screen_cache_time: float = 0.0
 _screen_cache_region: tuple | None = None
 _SCREEN_CACHE_TTL: float = 0.15
+
+_conf_adapt: dict[str, float] = {}
+_conf_history: dict[str, list[bool]] = {}
+
+
+def _get_adapted_confidence(template_name: str, base_confidence: float) -> float:
+    if not CONFIDENCE_ADAPTATION_ENABLED:
+        return base_confidence
+    adapted = _conf_adapt.get(template_name)
+    if adapted is None:
+        return base_confidence
+    return max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, adapted))
+
+
+def _record_match(template_name: str, success: bool):
+    if not CONFIDENCE_ADAPTATION_ENABLED:
+        return
+    if template_name not in _conf_history:
+        _conf_history[template_name] = []
+    history = _conf_history[template_name]
+    history.append(success)
+    if len(history) > 20:
+        history.pop(0)
+    recent_success = sum(history[-10:])
+    current = _conf_adapt.get(template_name, CONFIDENCE_BASE)
+    if recent_success >= int(10 * CONFIDENCE_SUCCESS_THRESHOLD):
+        new_conf = min(CONFIDENCE_MAX, current + CONFIDENCE_STEP)
+        if new_conf != current:
+            _conf_adapt[template_name] = new_conf
+            log.debug("置信度上调 %s: %.2f -> %.2f", template_name, current, new_conf)
+    elif recent_success <= int(10 * CONFIDENCE_FAIL_THRESHOLD):
+        new_conf = max(CONFIDENCE_MIN, current - CONFIDENCE_STEP)
+        if new_conf != current:
+            _conf_adapt[template_name] = new_conf
+            log.debug("置信度下调 %s: %.2f -> %.2f", template_name, current, new_conf)
+    else:
+        _conf_adapt[template_name] = current
 
 
 def _get_screen_cache():
@@ -134,10 +172,15 @@ def _match_one(haystack: np.ndarray, template: np.ndarray, confidence: float):
 def _match_on_array(haystack: np.ndarray, template_name: str, confidence: float = 0.82):
     template = _load_template(template_name)
     if template is None:
+        _record_match(template_name, False)
         return None
+    adapted = _get_adapted_confidence(template_name, confidence)
     if MULTI_SCALE_MATCH:
-        return _multi_scale_match(haystack, template, confidence)
-    return _match_one(haystack, template, confidence)
+        r = _multi_scale_match(haystack, template, adapted)
+    else:
+        r = _match_one(haystack, template, adapted)
+    _record_match(template_name, r is not None)
+    return r
 
 
 def _search_region(template_name: str, screen_size):

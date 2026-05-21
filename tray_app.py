@@ -2,7 +2,7 @@ import sys
 import time
 import threading
 from pathlib import Path
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageEnhance
 
 from config import setup_logging, ensure_dirs, log, apply_settings, TRIGGER_HOTKEY, InputMethod, WAKE_WORD_ENABLED
 from settings import load, get, get_input_method
@@ -33,7 +33,6 @@ def _create_icon_image_active():
     if icon_path.exists():
         img = Image.open(str(icon_path)).resize((64, 64), Image.LANCZOS).convert("RGBA")
         colored = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        from PIL import ImageEnhance
         enhancer = ImageEnhance.Color(img)
         return enhancer.enhance(1.3)
     size = 64
@@ -49,7 +48,6 @@ def _create_icon_image_wake():
     icon_path = Path(__file__).parent / "app_icon.png"
     if icon_path.exists():
         img = Image.open(str(icon_path)).resize((64, 64), Image.LANCZOS).convert("RGBA")
-        from PIL import ImageEnhance
         enhancer = ImageEnhance.Brightness(img)
         return enhancer.enhance(0.85)
     size = 64

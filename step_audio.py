@@ -2,12 +2,11 @@ import json
 import threading
 import queue
 import time
-import tempfile
-import os
 import base64
 import io
 import wave
 import winsound
+import websocket
 
 from config import log, STEP_AUDIO_API_KEY
 
@@ -34,12 +33,6 @@ class StepAudioClient:
         if self._running:
             return
         self._running = True
-        try:
-            import websocket
-            self._websocket = websocket
-        except ImportError:
-            log.error("StepAudio 需要 websocket-client 库: pip install websocket-client")
-            return
         self._ws_thread = threading.Thread(target=self._run_ws, daemon=True, name="StepAudio")
         self._ws_thread.start()
         player_thread = threading.Thread(target=self._play_audio_loop, daemon=True, name="StepAudioPlayer")
@@ -109,7 +102,7 @@ class StepAudioClient:
 
         while self._running:
             try:
-                ws = self._websocket.WebSocketApp(
+                ws = websocket.WebSocketApp(
                     WS_URL,
                     header=headers,
                     on_open=on_open,
@@ -171,21 +164,13 @@ class StepAudioClient:
                         wf.setsampwidth(2)
                         wf.setframerate(24000)
                         wf.writeframes(pcm_data)
-                    wav_buffer.seek(0)
+                    wav_bytes = wav_buffer.getvalue()
 
-                    tmp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-                    tmp_file.write(wav_buffer.read())
-                    tmp_file.close()
                     try:
-                        winsound.PlaySound(tmp_file.name, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                        winsound.PlaySound(wav_bytes, winsound.SND_MEMORY | winsound.SND_ASYNC)
                         time.sleep(len(pcm_data) / (24000 * 2) + 0.5)
                     except Exception as exc:
                         log.warning("音频播放失败: %s", exc)
-                    finally:
-                        try:
-                            os.unlink(tmp_file.name)
-                        except Exception:
-                            pass
 
             except Exception as exc:
                 log.error("StepAudio 播报异常: %s", exc)

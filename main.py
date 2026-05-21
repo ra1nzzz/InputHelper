@@ -24,6 +24,8 @@ from config import (
     FEEDFORWARD_ENABLED,
     ADAPTIVE_MIN_INTERVAL_MS, ADAPTIVE_MAX_INTERVAL_MS,
     STEP_AUDIO_ENABLED, STEP_AUDIO_VOICE,
+    FOREGROUND_DELAY_S, ACTIVATION_POST_DELAY_S, QW_RELEASE_DELAY_S,
+    COPY_CLIPBOARD_DELAY_S,
 )
 from detector import (
     find_template, find_on_screen, check_on_screen,
@@ -82,7 +84,7 @@ def _get_foreground_title():
     return win32gui.GetWindowText(hwnd), hwnd
 
 
-def _find_chat_window():
+def _find_candidate_window():
     exclude_keywords = [
         "系统托盘", "溢出窗口", "TaskSwitcherWnd", "Windows Input Experience",
         "TextInputHost", "ShellExperienceHost", "StartMenuExperience",
@@ -119,7 +121,7 @@ def _set_foreground(hwnd):
     try:
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         win32gui.SetForegroundWindow(hwnd)
-        time.sleep(0.25)
+        time.sleep(FOREGROUND_DELAY_S)
     except Exception:
         pass
 
@@ -140,11 +142,12 @@ class SystemIdentifier:
         if not iterations or self._identified:
             return
         log.info("开始系统辨识 (%d次迭代)...", iterations)
-        latencies = []
+        bar_latencies = []
+        proc_latencies = []
         for i in range(iterations):
             t0 = time.perf_counter()
             press_hotkey(list(ACTIVATE_HOTKEY))
-            time.sleep(0.5)
+            time.sleep(ACTIVATION_POST_DELAY_S)
             screen = capture_screen()
             for _ in range(20):
                 if check_on_screen(screen, TEMPLATE_READY_TO_SPEAKING, confidence=0.6):
@@ -152,14 +155,36 @@ class SystemIdentifier:
                 time.sleep(0.1)
                 screen = capture_screen()
             t1 = time.perf_counter()
-            latencies.append(t1 - t0)
+            bar_latencies.append(t1 - t0)
             log.info("  辨识[%d/%d]: 语音条出现延迟=%.2fs", i + 1, iterations, t1 - t0)
 
-        if latencies:
-            self._metrics["bar_latency_p50"] = float(np.median(latencies))
-            self._metrics["bar_latency_p95"] = float(np.percentile(latencies, 95))
-            log.info("系统辨识完成: 语音条延迟 p50=%.2fs p95=%.2fs",
-                     self._metrics["bar_latency_p50"], self._metrics["bar_latency_p95"])
+            click_result = find_template(TEMPLATE_CONFIRM_BTN, confidence=0.6)
+            if click_result:
+                cx, cy = click_result["center"]
+                click(cx, cy)
+            t2 = time.perf_counter()
+            screen = capture_screen()
+            for _ in range(30):
+                if check_on_screen(screen, TEMPLATE_COPY_BTN, confidence=0.6):
+                    break
+                time.sleep(0.1)
+                screen = capture_screen()
+            t3 = time.perf_counter()
+            processing_time = t3 - t2
+            proc_latencies.append(processing_time)
+            log.info("  辨识[%d/%d]: 处理延迟=%.2fs", i + 1, iterations, processing_time)
+
+        if bar_latencies:
+            self._metrics["bar_latency_p50"] = float(np.median(bar_latencies))
+            self._metrics["bar_latency_p95"] = float(np.percentile(bar_latencies, 95))
+        if proc_latencies:
+            self._metrics["processing_p50"] = float(np.median(proc_latencies))
+            self._metrics["processing_p95"] = float(np.percentile(proc_latencies, 95))
+        log.info("系统辨识完成: 语音条延迟 p50=%.2fs p95=%.2fs | 处理延迟 p50=%.2fs p95=%.2fs",
+                 self._metrics.get("bar_latency_p50", 0),
+                 self._metrics.get("bar_latency_p95", 0),
+                 self._metrics.get("processing_p50", 0),
+                 self._metrics.get("processing_p95", 0))
         self._identified = True
 
     @property
@@ -173,11 +198,209 @@ class SystemIdentifier:
 _system_identifier = SystemIdentifier()
 
 
-class InputHelper:
+class _ZhipuWorkflow:
+    def _do_activating(self):
+        log.info("发送激活快捷键 %s", "+".join(ACTIVATE_HOTKEY))
+        invalidate_screen_cache()
+        press_hotkey(list(ACTIVATE_HOTKEY))
+        time.sleep(ACTIVATION_POST_DELAY_S)
+        self._waiting_bar_start = time.time()
+        self._cycle_start = time.time()
+        self._in_cycle = True
+
+    def _do_waiting_bar(self):
+        if self._check_idle_timeout():
+            return
+        screen = capture_screen()
+        results = batch_check(screen, [
+            (TEMPLATE_READY_TO_SPEAKING, 0.82, (0, 0)),
+            (TEMPLATE_CONFIRM_BTN, 0.60, (0, 0)),
+        ])
+
+        if results.get(TEMPLATE_READY_TO_SPEAKING):
+            self._not_ready_count = 0
+            self._cancel_feedforward()
+            self._transition(State.WAITING_SPEECH)
+            return
+        if results.get(TEMPLATE_CONFIRM_BTN):
+            self._cancel_feedforward()
+            self._transition(State.WAITING_SPEECH)
+            return
+
+        if time.time() - self._waiting_bar_start > WAITING_BAR_TIMEOUT_S:
+            log.warning("等待语音条超时，重新激活")
+            self._transition(State.ACTIVATING)
+
+    def _do_waiting_speech(self):
+        screen = capture_screen()
+        if check_on_screen(screen, TEMPLATE_READY_TO_SPEAKING):
+            self._not_ready_count = 0
+            return
+        if check_on_screen(screen, TEMPLATE_PROCESSING):
+            self._processing_start = time.time()
+            self._transition(State.PROCESSING)
+            return
+        self._not_ready_count += 1
+        if self._not_ready_count >= self._not_ready_threshold:
+            log.info("连续 %d 帧未检测到「开始说话」，判定用户已开始说话", self._not_ready_threshold)
+            self._not_ready_count = 0
+            self._speaking_start = time.time()
+            self._speech_end_count = 0
+            self._transition(State.SPEAKING)
+
+    def _do_speaking(self):
+        speaking_duration = time.time() - self._speaking_start
+        if speaking_duration < self.MIN_SPEAKING_DURATION_S:
+            return
+        screen = capture_screen()
+        self._debug_screenshot_count += 1
+        if self._debug_screenshot_count % 10 == 1:
+            save_debug_screenshot("speaking", screen)
+
+        results = batch_check(screen, [
+            (TEMPLATE_SPEECH_DONE, 0.70, (0, 0)),
+            (TEMPLATE_PROCESSING, 0.82, (0, 0)),
+        ])
+
+        if results.get(TEMPLATE_SPEECH_DONE):
+            self._speech_end_count += 1
+            if self._speech_end_count >= self.SPEECH_END_STABLE_FRAMES:
+                log.info("连续 %d 帧检测到发言完成 (已说=%.1fs)",
+                         self.SPEECH_END_STABLE_FRAMES, speaking_duration)
+                save_debug_screenshot("speech_end_detected", screen)
+                self._speech_end_count = 0
+                if FEEDFORWARD_ENABLED:
+                    self._schedule_feedforward(0.8, State.PROCESSING)
+                self._transition(State.CONFIRMING)
+                return
+        else:
+            self._speech_end_count = 0
+
+        if results.get(TEMPLATE_PROCESSING):
+            self._processing_start = time.time()
+            self._transition(State.PROCESSING)
+            return
+
+    def _do_confirming(self):
+        r = find_template(TEMPLATE_CONFIRM_BTN, confidence=0.6)
+        if r:
+            cx, cy = r["center"]
+            log.info("点击确认按钮 (%d, %d)", cx, cy)
+            click(cx, cy)
+            region_learner.tracker(TEMPLATE_CONFIRM_BTN).update(cx, cy, r["size"][0], r["size"][1])
+            self._processing_start = time.time()
+            processing_latency = _system_identifier.get("processing_p95") or _system_identifier.get("processing_p50") or 1.5
+            if FEEDFORWARD_ENABLED:
+                self._schedule_feedforward(processing_latency * 0.8, State.RESULT_COPY)
+            self._transition(State.PROCESSING)
+        else:
+            log.warning("未找到确认按钮，重新激活")
+            self._transition(State.ACTIVATING)
+
+    def _do_processing(self):
+        screen = capture_screen()
+        if check_on_screen(screen, TEMPLATE_PROCESSING):
+            self._processing_start = time.time()
+            return
+        r = find_on_screen(screen, TEMPLATE_COPY_BTN, confidence=0.6)
+        if r:
+            region_learner.tracker(TEMPLATE_COPY_BTN).update(
+                r["center"][0], r["center"][1], r["size"][0], r["size"][1])
+            self._cancel_feedforward()
+            processing_latency = time.time() - self._processing_start
+            if self._in_cycle:
+                self._metrics_runtime["processing_latencies"].append(processing_latency)
+                if len(self._metrics_runtime["processing_latencies"]) > 30:
+                    self._metrics_runtime["processing_latencies"].pop(0)
+            self._transition(State.RESULT_COPY)
+            return
+        if time.time() - self._processing_start > PROCESSING_WAIT_TIMEOUT_S:
+            log.warning("处理超时")
+            self._transition(State.ERROR)
+
+    def _do_result_copy(self):
+        r = find_template(TEMPLATE_COPY_BTN, confidence=0.6)
+        if r:
+            cx, cy = r["center"]
+            log.info("点击复制按钮 (%d, %d)", cx, cy)
+            region_learner.tracker(TEMPLATE_COPY_BTN).update(cx, cy, r["size"][0], r["size"][1])
+            self._clipboard_before = _get_clipboard_text()
+            click(cx, cy)
+            if FEEDFORWARD_ENABLED:
+                self._schedule_feedforward(0.4, State.RESULT_CLOSE)
+            time.sleep(COPY_CLIPBOARD_DELAY_S)
+            self._transition(State.RESULT_CLOSE)
+        else:
+            log.warning("未找到复制按钮")
+            self._transition(State.ERROR)
+
+    def _do_result_close(self):
+        self._cancel_feedforward()
+        for i in range(CLOSE_RETRY_COUNT):
+            r = find_template(TEMPLATE_CLOSE_BTN, confidence=0.6)
+            if r:
+                cx, cy = r["center"]
+                log.info("点击关闭按钮 (%d, %d) 第%d次", cx, cy, i + 1)
+                region_learner.tracker(TEMPLATE_CLOSE_BTN).update(cx, cy, r["size"][0], r["size"][1])
+                click(cx, cy)
+                time.sleep(CLOSE_INTERVAL_S)
+            else:
+                break
+
+        new_text = _get_clipboard_text()
+        if new_text and new_text != self._clipboard_before:
+            log.info("复制验证成功，剪贴板内容长度: %d", len(new_text))
+        else:
+            log.warning("复制验证失败，剪贴板无变化")
+        self._transition(State.PASTE_SEND)
+
+
+class _QianwenWorkflow:
+    def _do_qw_monitoring_key(self):
+        self._check_idle_timeout()
+        if is_key_pressed("alt gr"):
+            if not self._qianwen_alt_pressed:
+                self._qianwen_alt_pressed = True
+                self._alt_release_processed = False
+                log.info("千问: 右ALT按下，开始说话")
+                self._speaking_start = time.time()
+                self._transition(State.QW_SPEAKING)
+
+    def _do_qw_speaking(self):
+        if not is_key_pressed("alt gr"):
+            if not self._alt_release_processed:
+                self._alt_release_processed = True
+                self._qianwen_alt_pressed = False
+                duration = time.time() - self._speaking_start
+                log.info("千问: 右ALT松开 (说话时长=%.1fs)", duration)
+                time.sleep(QW_RELEASE_DELAY_S)
+                self._transition(State.QW_WAITING_INPUT)
+            return
+
+    def _do_qw_waiting_input(self):
+        log.info("千问: 等待输入完成，准备按回车发送")
+        self._transition(State.QW_ENTER_SEND)
+
+    def _do_qw_enter_send(self):
+        title, hwnd = _find_candidate_window()
+        if hwnd:
+            self.target_hwnd = hwnd
+        log.info("千问: 切换到目标窗口并发送回车: %s", self.target_title)
+        _set_foreground(self.target_hwnd)
+        type_enter()
+        log.info("千问: 已发送回车")
+        play_success()
+
+        if self._wake_enabled:
+            self._schedule_idle_timeout()
+        self._transition(State.QW_MONITORING_KEY)
+
+
+class InputHelper(_ZhipuWorkflow, _QianwenWorkflow):
     MIN_SPEAKING_DURATION_S = 3.0
     SPEECH_END_STABLE_FRAMES = 5
 
-    def __init__(self):
+    def __init__(self, region_learner=None, step_audio_client=None):
         self.state = State.IDLE
         self.target_hwnd = None
         self.target_title = ""
@@ -202,6 +425,13 @@ class InputHelper:
 
         self._wake_detector = None
         self._wake_enabled = False
+        self._error_count = 0
+        self._max_error_backoff_s = 30.0
+        self._metrics_runtime = {"bar_latencies": [], "processing_latencies": [], "match_fail_rate": 0.0, "total_cycles": 0, "successful_cycles": 0}
+        self._cycle_start = 0.0
+        self._in_cycle = False
+        self._region_learner = region_learner
+        self._step_audio_client = step_audio_client
 
     def _cancel_feedforward(self):
         if self._feedforward_timer is not None:
@@ -229,7 +459,7 @@ class InputHelper:
 
         region_learner.load()
 
-        title, hwnd = _find_chat_window()
+        title, hwnd = _find_candidate_window()
         if not hwnd:
             title, hwnd = _get_foreground_title()
         self.target_hwnd = hwnd
@@ -347,6 +577,8 @@ class InputHelper:
         if self.state != new_state:
             log.info("状态转换: %s -> %s", self.state.value, new_state.value)
             self.state = new_state
+            if new_state != State.ERROR:
+                self._error_count = 0
             if new_state in (State.ACTIVATING, State.QW_MONITORING_KEY, State.QW_SPEAKING):
                 self._idle_start = time.time()
 
@@ -383,170 +615,16 @@ class InputHelper:
             return
         pass
 
-    # ========== 智谱AI 工作流 ==========
-
-    def _do_activating(self):
-        log.info("发送激活快捷键 %s", "+".join(ACTIVATE_HOTKEY))
-        invalidate_screen_cache()
-        press_hotkey(list(ACTIVATE_HOTKEY))
-        time.sleep(0.6)
-        self._waiting_bar_start = time.time()
-
-        bar_latency = _system_identifier.get("bar_latency_p95")
-        if bar_latency and FEEDFORWARD_ENABLED:
-            self._schedule_feedforward(bar_latency * 0.9, State.WAITING_SPEECH)
-        self._transition(State.WAITING_BAR)
-
-    def _do_waiting_bar(self):
-        if self._check_idle_timeout():
-            return
-        screen = capture_screen()
-        results = batch_check(screen, [
-            (TEMPLATE_READY_TO_SPEAKING, 0.82, (0, 0)),
-            (TEMPLATE_CONFIRM_BTN, 0.60, (0, 0)),
-        ])
-
-        if results.get(TEMPLATE_READY_TO_SPEAKING):
-            self._not_ready_count = 0
-            self._cancel_feedforward()
-            self._transition(State.WAITING_SPEECH)
-            return
-        if results.get(TEMPLATE_CONFIRM_BTN):
-            self._cancel_feedforward()
-            self._transition(State.WAITING_SPEECH)
-            return
-
-        if time.time() - self._waiting_bar_start > WAITING_BAR_TIMEOUT_S:
-            log.warning("等待语音条超时，重新激活")
-            self._transition(State.ACTIVATING)
-
-    def _do_waiting_speech(self):
-        screen = capture_screen()
-        if check_on_screen(screen, TEMPLATE_READY_TO_SPEAKING):
-            self._not_ready_count = 0
-            return
-        if check_on_screen(screen, TEMPLATE_PROCESSING):
-            self._processing_start = time.time()
-            self._transition(State.PROCESSING)
-            return
-        self._not_ready_count += 1
-        if self._not_ready_count >= self._not_ready_threshold:
-            log.info("连续 %d 帧未检测到「开始说话」，判定用户已开始说话", self._not_ready_threshold)
-            self._not_ready_count = 0
-            self._speaking_start = time.time()
-            self._speech_end_count = 0
-            self._transition(State.SPEAKING)
-
-    def _do_speaking(self):
-        speaking_duration = time.time() - self._speaking_start
-        if speaking_duration < self.MIN_SPEAKING_DURATION_S:
-            return
-        screen = capture_screen()
-        self._debug_screenshot_count += 1
-        if self._debug_screenshot_count % 10 == 1:
-            save_debug_screenshot("speaking", screen)
-
-        results = batch_check(screen, [
-            (TEMPLATE_SPEECH_DONE, 0.70, (0, 0)),
-            (TEMPLATE_PROCESSING, 0.82, (0, 0)),
-        ])
-
-        if results.get(TEMPLATE_SPEECH_DONE):
-            self._speech_end_count += 1
-            if self._speech_end_count >= self.SPEECH_END_STABLE_FRAMES:
-                log.info("连续 %d 帧检测到发言完成 (已说=%.1fs)",
-                         self.SPEECH_END_STABLE_FRAMES, speaking_duration)
-                save_debug_screenshot("speech_end_detected", screen)
-                self._speech_end_count = 0
-                if FEEDFORWARD_ENABLED:
-                    self._schedule_feedforward(0.8, State.PROCESSING)
-                self._transition(State.CONFIRMING)
-                return
-        else:
-            self._speech_end_count = 0
-
-        if results.get(TEMPLATE_PROCESSING):
-            self._processing_start = time.time()
-            self._transition(State.PROCESSING)
-            return
-
-    def _do_confirming(self):
-        r = find_template(TEMPLATE_CONFIRM_BTN, confidence=0.6)
-        if r:
-            cx, cy = r["center"]
-            log.info("点击确认按钮 (%d, %d)", cx, cy)
-            click(cx, cy)
-            region_learner.tracker(TEMPLATE_CONFIRM_BTN).update(cx, cy, r["size"][0], r["size"][1])
-            self._processing_start = time.time()
-            processing_latency = _system_identifier.get("processing_latency", 1.5)
-            if FEEDFORWARD_ENABLED:
-                self._schedule_feedforward(processing_latency * 0.8, State.RESULT_COPY)
-            self._transition(State.PROCESSING)
-        else:
-            log.warning("未找到确认按钮，重新激活")
-            self._transition(State.ACTIVATING)
-
-    def _do_processing(self):
-        screen = capture_screen()
-        if check_on_screen(screen, TEMPLATE_PROCESSING):
-            self._processing_start = time.time()
-            return
-        r = find_on_screen(screen, TEMPLATE_COPY_BTN, confidence=0.6)
-        if r:
-            region_learner.tracker(TEMPLATE_COPY_BTN).update(
-                r["center"][0], r["center"][1], r["size"][0], r["size"][1])
-            self._cancel_feedforward()
-            self._transition(State.RESULT_COPY)
-            return
-        if time.time() - self._processing_start > PROCESSING_WAIT_TIMEOUT_S:
-            log.warning("处理超时")
-            self._transition(State.ERROR)
-
-    def _do_result_copy(self):
-        r = find_template(TEMPLATE_COPY_BTN, confidence=0.6)
-        if r:
-            cx, cy = r["center"]
-            log.info("点击复制按钮 (%d, %d)", cx, cy)
-            region_learner.tracker(TEMPLATE_COPY_BTN).update(cx, cy, r["size"][0], r["size"][1])
-            self._clipboard_before = _get_clipboard_text()
-            click(cx, cy)
-            if FEEDFORWARD_ENABLED:
-                self._schedule_feedforward(0.4, State.RESULT_CLOSE)
-            time.sleep(0.5)
-            self._transition(State.RESULT_CLOSE)
-        else:
-            log.warning("未找到复制按钮")
-            self._transition(State.ERROR)
-
-    def _do_result_close(self):
-        self._cancel_feedforward()
-        for i in range(CLOSE_RETRY_COUNT):
-            r = find_template(TEMPLATE_CLOSE_BTN, confidence=0.6)
-            if r:
-                cx, cy = r["center"]
-                log.info("点击关闭按钮 (%d, %d) 第%d次", cx, cy, i + 1)
-                region_learner.tracker(TEMPLATE_CLOSE_BTN).update(cx, cy, r["size"][0], r["size"][1])
-                click(cx, cy)
-                time.sleep(CLOSE_INTERVAL_S)
-            else:
-                break
-
-        new_text = _get_clipboard_text()
-        if new_text and new_text != self._clipboard_before:
-            log.info("复制验证成功，剪贴板内容长度: %d", len(new_text))
-        else:
-            log.warning("复制验证失败，剪贴板无变化")
-        self._transition(State.PASTE_SEND)
+    # ========== 粘贴发送（共享） ==========
 
     def _do_paste_send(self):
-        title, hwnd = _find_chat_window()
+        title, hwnd = _find_candidate_window()
         if hwnd and hwnd != self.target_hwnd:
             self.target_hwnd = hwnd
             self.target_title = title
             log.info("重新识别到目标窗口: %s", title)
         log.info("切换到目标窗口并粘贴发送: %s (hwnd=%s)", self.target_title, self.target_hwnd)
         _set_foreground(self.target_hwnd)
-        time.sleep(0.3)
         clip_text = _get_clipboard_text()
         log.info("剪贴板内容长度: %d", len(clip_text) if clip_text else 0)
         paste_from_clipboard()
@@ -554,6 +632,10 @@ class InputHelper:
         type_enter()
         log.info("已执行粘贴+回车")
         play_success()
+        if self._in_cycle:
+            self._metrics_runtime["total_cycles"] += 1
+            self._metrics_runtime["successful_cycles"] += 1
+            self._in_cycle = False
 
         if clip_text and len(clip_text) > 0:
             step_speak(clip_text[:500])
@@ -565,57 +647,18 @@ class InputHelper:
             time.sleep(1.0)
             self._transition(State.ACTIVATING)
 
-    # ========== 千问语音输入 工作流 ==========
-
-    def _do_qw_monitoring_key(self):
-        self._check_idle_timeout()
-        if is_key_pressed("alt gr"):
-            if not self._qianwen_alt_pressed:
-                self._qianwen_alt_pressed = True
-                self._alt_release_processed = False
-                log.info("千问: 右ALT按下，开始说话")
-                self._speaking_start = time.time()
-                self._transition(State.QW_SPEAKING)
-
-    def _do_qw_speaking(self):
-        if not is_key_pressed("alt gr"):
-            if not self._alt_release_processed:
-                self._alt_release_processed = True
-                self._qianwen_alt_pressed = False
-                duration = time.time() - self._speaking_start
-                log.info("千问: 右ALT松开 (说话时长=%.1fs)", duration)
-                time.sleep(0.5)
-                self._transition(State.QW_WAITING_INPUT)
-            return
-
-    def _do_qw_waiting_input(self):
-        log.info("千问: 等待输入完成，准备按回车发送")
-        self._transition(State.QW_ENTER_SEND)
-
-    def _do_qw_enter_send(self):
-        title, hwnd = _find_chat_window()
-        if hwnd:
-            self.target_hwnd = hwnd
-        log.info("千问: 切换到目标窗口并发送回车: %s", self.target_title)
-        _set_foreground(self.target_hwnd)
-        time.sleep(0.3)
-        type_enter()
-        log.info("千问: 已发送回车")
-        play_success()
-
-        if self._wake_enabled:
-            self._schedule_idle_timeout()
-        self._transition(State.QW_MONITORING_KEY)
-
     # ========== 错误处理 ==========
 
     def _do_error(self):
         play_error()
         self._cancel_feedforward()
+        self._error_count += 1
+        backoff = min(self._max_error_backoff_s, self._error_count * 2.0)
+        log.warning("错误恢复 backoff=%.1fs (连续错误=%d)", backoff, self._error_count)
+        time.sleep(backoff)
         if self._wake_enabled:
             self._schedule_idle_timeout()
             self._transition(State.WAKE_MONITOR)
         else:
-            time.sleep(1.0)
             self._transition(State.ACTIVATING if self._input_method == InputMethod.ZHIPU
                              else State.QW_MONITORING_KEY)

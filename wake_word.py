@@ -3,6 +3,7 @@ import queue
 import time
 import json
 import os
+import pyaudio
 from pathlib import Path
 
 from config import log, WAKE_WORD, DATA_DIR
@@ -92,7 +93,6 @@ class WakeWordDetector:
         return self._load_error or ""
 
     def _run(self):
-        import pyaudio
         self._p = pyaudio.PyAudio()
         try:
             self._stream = self._p.open(
