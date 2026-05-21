@@ -112,6 +112,7 @@ class _SettingsDialog(tk.Toplevel):
         self._wake_timeout_var = tk.IntVar(value=5)
         self._step_audio_enabled_var = tk.BooleanVar(value=False)
         self._step_audio_voice_var = tk.StringVar(value="qingnianansheng")
+        self._step_audio_api_key_var = tk.StringVar(value="")
         self._capturing = False
         self._captured_keys = []
         self._capture_target = None
@@ -262,14 +263,25 @@ class _SettingsDialog(tk.Toplevel):
             ttk.Radiobutton(voice_frame, text=voice_label, variable=self._step_audio_voice_var,
                             value=voice_val).pack(side=tk.LEFT, padx=(0, 12))
 
-        ttk.Separator(tab3, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
+        ttk.Separator(tab3, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
+
+        row_api = ttk.Frame(tab3)
+        row_api.pack(fill=tk.X, **pad)
+        ttk.Label(row_api, text="API Key:", font=("Microsoft YaHei", 10)).pack(side=tk.LEFT)
+        self._api_key_entry = ttk.Entry(row_api, textvariable=self._step_audio_api_key_var,
+                                        width=32, font=("Consolas", 9), show="*")
+        self._api_key_entry.pack(side=tk.LEFT, padx=(6, 4))
+        ttk.Label(row_api, text="← 必填", font=("Microsoft YaHei", 8),
+                  foreground="red").pack(side=tk.LEFT)
+
+        ttk.Separator(tab3, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
 
         info_text_step = (
             "技术说明:\n"
             "• 使用 stepaudio-2.5-realtime 模型，非传统 TTS\n"
             "• 优势：响应延迟更低，语音更自然有表现力\n"
             "• 适用场景：VibeCoding 结果播报、聊天语音回复\n"
-            "• 需要网络连接，API Key 已内置"
+            "• 需要网络连接，请自行申请 API Key"
         )
         info_label_step = ttk.Label(tab3, text=info_text_step, font=("Microsoft YaHei", 8),
                                     foreground="gray", justify=tk.LEFT)
@@ -305,6 +317,7 @@ class _SettingsDialog(tk.Toplevel):
         self._wake_timeout_var.set(s.get("wake_idle_timeout_min", 5))
         self._step_audio_enabled_var.set(s.get("step_audio_enabled", False))
         self._step_audio_voice_var.set(s.get("step_audio_voice", "qingnianansheng"))
+        self._step_audio_api_key_var.set(s.get("step_audio_api_key", ""))
         self._on_wake_toggle()
         self._on_input_method_change()
 
@@ -394,6 +407,11 @@ class _SettingsDialog(tk.Toplevel):
         wake_timeout = self._wake_timeout_var.get()
         step_audio_enabled = self._step_audio_enabled_var.get()
         step_audio_voice = self._step_audio_voice_var.get()
+        step_audio_api_key = self._step_audio_api_key_var.get().strip()
+
+        if step_audio_enabled and not step_audio_api_key:
+            messagebox.showwarning("提示", "启用 StepAudio 播报时，API Key 不能为空\n请先在 阶跃星辰 官网申请 API Key", parent=self)
+            return
 
         if wake_enabled and not wake_word:
             messagebox.showwarning("提示", "启用唤醒词功能时，唤醒词不能为空", parent=self)
@@ -413,6 +431,7 @@ class _SettingsDialog(tk.Toplevel):
             "wake_idle_timeout_min": wake_timeout,
             "step_audio_enabled": step_audio_enabled,
             "step_audio_voice": step_audio_voice,
+            "step_audio_api_key": step_audio_api_key,
         })
 
         try:

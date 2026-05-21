@@ -32,6 +32,9 @@ class StepAudioClient:
     def start(self):
         if self._running:
             return
+        if not STEP_AUDIO_API_KEY:
+            log.warning("StepAudio API Key 未设置，播报功能不可用")
+            return
         self._running = True
         self._ws_thread = threading.Thread(target=self._run_ws, daemon=True, name="StepAudio")
         self._ws_thread.start()

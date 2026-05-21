@@ -47,3 +47,11 @@ def click(x: int, y: int, retries: int = 2, delay: float = 0.1):
 
 def is_key_pressed(key: str) -> bool:
     return kb.is_pressed(key)
+
+
+def is_right_alt_pressed() -> bool:
+    try:
+        import win32api
+        return (win32api.GetAsyncKeyState(0xA5) & 0x8000) != 0
+    except Exception:
+        return is_key_pressed("alt gr")

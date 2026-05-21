@@ -34,7 +34,7 @@ from detector import (
 )
 from controller import (
     click, press_hotkey, paste_from_clipboard, type_enter,
-    is_key_pressed,
+    is_key_pressed, is_right_alt_pressed,
 )
 from sound import play_start, play_success, play_error
 from region_learner import region_learner
@@ -358,7 +358,7 @@ class _ZhipuWorkflow:
 class _QianwenWorkflow:
     def _do_qw_monitoring_key(self):
         self._check_idle_timeout()
-        if is_key_pressed("alt gr"):
+        if is_right_alt_pressed():
             if not self._qianwen_alt_pressed:
                 self._qianwen_alt_pressed = True
                 self._alt_release_processed = False
@@ -367,7 +367,7 @@ class _QianwenWorkflow:
                 self._transition(State.QW_SPEAKING)
 
     def _do_qw_speaking(self):
-        if not is_key_pressed("alt gr"):
+        if not is_right_alt_pressed():
             if not self._alt_release_processed:
                 self._alt_release_processed = True
                 self._qianwen_alt_pressed = False

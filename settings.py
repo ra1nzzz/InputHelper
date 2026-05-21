@@ -19,7 +19,7 @@ DEFAULTS = {
     "wake_idle_timeout_min": 5,
     "step_audio_enabled": False,
     "step_audio_voice": "qingnianansheng",
-    "step_audio_api_key": "64GLA6Ad6JIn8QgL7Qw3UQ9vmSxsFwXkWtt3KgK0VIaCyK903UlAACPkLLAOPJfaw",
+    "step_audio_api_key": "",
 }
 
 _settings: dict = {}
