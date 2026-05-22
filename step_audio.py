@@ -34,10 +34,11 @@ class StepAudioClient(ISpeechClient):
     def start(self):
         if self._running:
             return
-        if not STEP_AUDIO_API_KEY:
+        if not self._api_key:
             log.warning("StepAudio API Key 未设置，播报功能不可用")
             return
         self._running = True
+        self._connected.clear()
         self._ws_thread = threading.Thread(target=self._run_ws, daemon=True, name="StepAudio")
         self._ws_thread.start()
         player_thread = threading.Thread(target=self._play_audio_loop, daemon=True, name="StepAudioPlayer")
@@ -213,13 +214,13 @@ def preview_voice(voice: str, api_key: str) -> bool:
         log.warning("预览音色失败: API Key 未设置")
         return False
     client = StepAudioClient(voice=voice, api_key=api_key)
-    client._running = True
-    client._ws_thread = threading.Thread(target=client._run_ws, daemon=True, name="StepAudioPreview")
-    client._ws_thread.start()
-    player_thread = threading.Thread(target=client._play_audio_loop, daemon=True, name="StepAudioPreviewPlayer")
-    player_thread.start()
+    client.start()
+    if not client._connected.wait(timeout=8):
+        log.warning("预览音色失败: WebSocket 连接超时")
+        client.stop()
+        return False
     client.speak("你好，这是语音播报的预览效果，你觉得这个音色怎么样？")
-    time.sleep(4)
+    time.sleep(8)
     client.stop()
     return True
 
